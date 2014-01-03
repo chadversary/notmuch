@@ -134,6 +134,77 @@ tag_query (void *ctx, notmuch_database_t *notmuch, const char *query_string,
     return ret || interrupted;
 }
 
+/* Wrapper around getline() that supports line continuation.
+ *
+ * If any line ends with "\\\n", then the "\\\n" is removed and the line is
+ * joined with the next line.
+ */
+static ssize_t
+getline_cont (char **line, size_t *n, FILE *input)
+{
+	char *multi_line = NULL;
+	size_t multi_line_size = 0;
+	ssize_t multi_line_len = -1;
+
+	char *single_line = NULL;
+	size_t single_line_size = 0;
+	ssize_t single_line_len = -1;
+
+	while (1) {
+		single_line_len = getline (&single_line, &single_line_size,
+				           input);
+		if (single_line_len == -1 || interrupted) {
+			free (multi_line);
+			free (single_line);
+			return -1;
+		}
+
+		if (multi_line_size == 0) {
+			multi_line = single_line;
+			multi_line_len = single_line_len;
+			multi_line_size = single_line_size;
+
+			single_line = NULL;
+			single_line_size = 0;
+			single_line_len = -1;
+		} else {
+			ssize_t multi_line_old_len = multi_line_len;
+			ssize_t multi_line_new_len = multi_line_len + single_line_len;
+
+			if ((ssize_t)multi_line_size < multi_line_new_len + 1) {
+				multi_line_size = multi_line_new_len + 1;
+				multi_line = realloc(multi_line, multi_line_size);
+			}
+
+			memcpy(multi_line + multi_line_old_len, single_line,
+			       single_line_len);
+			multi_line[multi_line_new_len] = '\0';
+			multi_line_len = multi_line_new_len;
+
+			free (single_line);
+			single_line = NULL;
+		}
+
+		if (multi_line_len < 2) {
+			break;
+		} else if (multi_line[multi_line_len - 1] == '\n' &&
+		           multi_line[multi_line_len - 2] == '\\') {
+			multi_line_len -= 2;
+			multi_line[multi_line_len] = '\0';
+		} else {
+			break;
+		}
+	}
+
+	if (*line != NULL) {
+		free (*line);
+	}
+
+	*line = multi_line;
+	*n = multi_line_size;
+	return multi_line_len;
+}
+
 static int
 tag_file (void *ctx, notmuch_database_t *notmuch, tag_op_flag_t flags,
 	  FILE *input)
@@ -152,7 +223,7 @@ tag_file (void *ctx, notmuch_database_t *notmuch, tag_op_flag_t flags,
 	return 1;
     }
 
-    while ((line_len = getline (&line, &line_size, input)) != -1 &&
+    while ((line_len = getline_cont (&line, &line_size, input)) != -1 &&
 	   ! interrupted) {
 
 	ret = parse_tag_line (ctx, line, TAG_FLAG_NONE,
